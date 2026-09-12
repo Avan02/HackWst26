@@ -1,15 +1,19 @@
-node_modules/
-dist/
-build/
+# Secrets
 .env
 .env.local
-*.log
-.DS_Store
-.vscode/
-.idea/
-.claude/
+
+# Python
 __pycache__/
 *.pyc
 venv/
 .venv/
-STATUS.md
+
+# Editors / tooling
+.idea/
+.claude/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
