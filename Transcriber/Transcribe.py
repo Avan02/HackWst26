@@ -191,39 +191,46 @@ def generate_notes(client: genai.Client, segments: List[Segment]) -> List[Highli
  
 # ---------- glue ----------
  
-def main(video_path: str, output_path: str = "session_output.json"):
+def run_pipeline(video_path: str, output_path: str = "session_output.json") -> dict:
+    """
+    Runs the full pipeline on a video/audio file and returns the result dict
+    ({"video_path", "segments", "highlights"}). Pass output_path=None to skip
+    writing a JSON file (e.g. when called from a web endpoint).
+    """
     client = genai.Client()  # reads GEMINI_API_KEY from env
- 
+
     print("Extracting audio...")
     audio_path = extract_audio(video_path)
- 
+
     print("Uploading audio to Gemini...")
     audio_file = upload_and_wait(client, audio_path)
- 
+
     print("Transcribing with word-level timestamps...")
     words = transcribe_with_word_timestamps(client, audio_file)
- 
+
     print(f"Got {len(words)} words. Grouping into segments...")
     segments = group_into_segments(words)
- 
+
     print(f"Built {len(segments)} segments. Generating notes/highlights...")
     highlights = generate_notes(client, segments)
- 
+
     result = {
         "video_path": video_path,
         "segments": [s.model_dump() for s in segments],
         "highlights": [h.model_dump() for h in highlights],
     }
- 
-    with open(output_path, "w") as f:
-        json.dump(result, f, indent=2)
- 
-    print(f"Done. Wrote {output_path}")
+
+    if output_path:
+        with open(output_path, "w") as f:
+            json.dump(result, f, indent=2)
+        print(f"Done. Wrote {output_path}")
+
     print(f"  {len(segments)} transcript segments, {len(highlights)} highlights")
- 
- 
+    return result
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python transcribe_pipeline.py path/to/video.mp4")
+        print("Usage: python Transcribe.py path/to/video.mp4")
         sys.exit(1)
-    main(sys.argv[1])
+    run_pipeline(sys.argv[1])

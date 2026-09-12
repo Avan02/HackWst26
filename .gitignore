@@ -1,1 +1,4 @@
 .env
+Video_Folder/*
+extracted_audio.mp3
+__pycache__/

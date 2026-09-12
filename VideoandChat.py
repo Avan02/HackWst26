@@ -2,6 +2,9 @@ import json
 from typing import Dict, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
+from pathlib import Path
+from fastapi import UploadFile, File, Form
+from Transcriber.Transcribe import run_pipeline
 
 app = FastAPI(title="TutorMatch Backend")
 
@@ -28,7 +31,27 @@ class ConnectionManager:
         for connection in self.active_connections.get(room_id, []):
             if connection != sender:
                 await connection.send_text(message)
+VIDEO_FOLDER = Path(__file__).parent / "Video_Folder"
+VIDEO_FOLDER.mkdir(exist_ok=True)
 
+
+@app.post("/upload_recording")
+async def upload_recording(
+    file: UploadFile = File(...),
+    session_id: str = Form(...),
+    role: str = Form(...),
+):
+    filename = f"{session_id}_{role}.webm"
+    save_path = VIDEO_FOLDER / filename
+    with open(save_path, "wb") as f:
+        f.write(await file.read())
+
+    transcription = None
+    if role == "tutor":
+      output_json_path = VIDEO_FOLDER / f"{session_id}_{role}_output.json"
+      transcription = run_pipeline(str(save_path), output_path=str(output_json_path))
+
+    return {"status": "ok", "saved_to": str(save_path), "transcription": transcription}
 
 manager = ConnectionManager()
 
@@ -689,6 +712,7 @@ CALL_HTML = """
     <button class="primary" id="joinBtn" onclick="start()">Join Call</button>
     <button class="ghost" id="shareBtn" onclick="toggleShare()" disabled>Share Screen</button>
     <button class="ghost" id="chatBtn" onclick="toggleChat()" disabled>Toggle Chat</button>
+        <button class="ghost" id="endBtn" onclick="endCall()" disabled>End Call</button>
   </div>
 </div>
 
@@ -711,6 +735,8 @@ let localStream = null;
 let screenStream = null;
 let makingOffer = false;
 let ignoreOffer = false;
+let mediaRecorder = null;
+let recordedChunks = [];
 const isPolite = myClientId === 'tutor';
 const pendingCandidates = [];
 
@@ -759,6 +785,9 @@ async function start() {
     return;
   }
   document.getElementById('localVideo').srcObject = localStream;
+    if (myClientId === 'tutor') {
+    startRecording();
+  }
 
   pc = new RTCPeerConnection(servers);
   localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
@@ -813,6 +842,7 @@ async function start() {
     document.getElementById('joinBtn').disabled = true;
     document.getElementById('shareBtn').disabled = false;
     document.getElementById('chatBtn').disabled = false;
+        document.getElementById('endBtn').disabled = false;
   });
 
   ws.addEventListener('close', () => setStatus(false, 'Disconnected'));
@@ -903,6 +933,52 @@ async function toggleShare() {
       if (screenStream) toggleShare();
     };
   }
+}
+function startRecording() {
+  recordedChunks = [];
+  try {
+    mediaRecorder = new MediaRecorder(localStream, { mimeType: 'video/webm;codecs=vp8,opus' });
+  } catch (err) {
+    console.error('MediaRecorder not supported:', err);
+    return;
+  }
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+  };
+  mediaRecorder.start();
+}
+
+async function endCall() {
+  const endBtn = document.getElementById('endBtn');
+  endBtn.disabled = true;
+  endBtn.textContent = 'Saving...';
+
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    const stopped = new Promise((resolve) => { mediaRecorder.onstop = resolve; });
+    mediaRecorder.stop();
+    await stopped;
+
+    const blob = new Blob(recordedChunks, { type: 'video/webm' });
+    const formData = new FormData();
+    formData.append('file', blob, `${sessionId}_${myClientId}.webm`);
+    formData.append('session_id', sessionId);
+    formData.append('role', myClientId);
+
+    try {
+      const resp = await fetch('/upload_recording', { method: 'POST', body: formData });
+      const result = await resp.json();
+      console.log('Recording uploaded:', result);
+      appendChat('system', 'Recording saved and sent for processing.');
+    } catch (err) {
+      console.error('Upload failed:', err);
+      appendChat('system', 'Recording upload failed.');
+    }
+  }
+
+  if (ws) ws.close();
+  if (pc) pc.close();
+  if (localStream) localStream.getTracks().forEach(t => t.stop());
+  endBtn.textContent = 'Call Ended';
 }
 
 function toggleChat() {
