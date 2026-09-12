@@ -426,6 +426,206 @@ def get_learner_profile(user_id: str) -> dict[str, Any] | None:
     return fetch_one("SELECT * FROM learner_profiles WHERE user_id = %s", (user_id,))
 
 
+# ----------------------------------------------------------------- sessions
+
+
+def create_session(
+    student_id: str,
+    tutor_id: str,
+    subject: str,
+    *,
+    mode: str = "video",
+    room_url: str | None = None,
+) -> str:
+    """Start a tutoring session. Returns the session id everything else keys off."""
+    row = fetch_one(
+        """
+        INSERT INTO sessions (student_id, tutor_id, subject, mode, room_url, status)
+        VALUES (%s, %s, %s, %s, %s, 'pending')
+        RETURNING id
+        """,
+        (student_id, tutor_id, subject, mode, room_url),
+    )
+    return str(row["id"])
+
+
+def get_session(session_id: str) -> dict[str, Any] | None:
+    return fetch_one("SELECT * FROM sessions WHERE id = %s", (session_id,))
+
+
+def set_session_status(
+    session_id: str,
+    status: str,
+    *,
+    recording_url: str | None = None,
+) -> None:
+    """Move a session along: pending -> paid -> live -> ended -> processed."""
+    execute(
+        """
+        UPDATE sessions SET
+            status        = %s,
+            recording_url = COALESCE(%s, recording_url),
+            started_at    = CASE WHEN %s = 'live'  THEN now() ELSE started_at END,
+            ended_at      = CASE WHEN %s = 'ended' THEN now() ELSE ended_at   END
+        WHERE id = %s
+        """,
+        (status, recording_url, status, status, session_id),
+    )
+
+
+# ------------------------------------------------------- transcripts + notes
+
+
+def ts_to_ms(value: Any) -> int:
+    """Normalise a timestamp into integer milliseconds.
+
+    The AI pipeline emits "MM:SS" (and sometimes "HH:MM:SS") strings because
+    they read well on screen. The video player needs a number to seek to.
+    Everything stored in the database is milliseconds, so the conversion
+    happens here, once, rather than in every caller.
+
+        ts_to_ms("02:34")   -> 154000
+        ts_to_ms(154.0)     -> 154000      (seconds as a number)
+    """
+    if isinstance(value, (int, float)):
+        return int(round(float(value) * 1000))
+
+    text = str(value).strip()
+    if not text:
+        return 0
+    if ":" not in text:
+        return int(round(float(text) * 1000))
+
+    parts = [float(p) for p in text.split(":")]
+    seconds = 0.0
+    for part in parts:            # handles MM:SS and HH:MM:SS alike
+        seconds = seconds * 60 + part
+    return int(round(seconds * 1000))
+
+
+def _field(obj: Any, name: str, default: Any = None) -> Any:
+    """Read a field off either a dict or an object (e.g. a pydantic model)."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def save_session_notes(
+    session_id: str,
+    highlights: list[Any],
+    *,
+    summary: str = "",
+    concepts: list[str] | None = None,
+    action_items: list[str] | None = None,
+) -> None:
+    """Store the AI-generated notes for a session.
+
+    `highlights` accepts the AI pipeline's own shape directly - dicts or
+    pydantic models with start_ts / title / note. Timestamps are converted to
+    integer milliseconds on the way in, so the website can feed them straight
+    to the player's seek call.
+
+        from tutormatch import save_session_notes
+        save_session_notes(session_id, highlights, summary=...)
+    """
+    key_moments = [
+        {
+            "tMs": ts_to_ms(_field(h, "start_ts", _field(h, "start_sec", 0))),
+            "title": _field(h, "title", "") or "",
+            "why": _field(h, "note", _field(h, "why", "")) or "",
+        }
+        for h in highlights or []
+    ]
+
+    execute(
+        """
+        INSERT INTO session_notes
+            (session_id, summary, key_moments, concepts, action_items, generated_at)
+        VALUES (%s, %s, %s, %s, %s, now())
+        ON CONFLICT (session_id) DO UPDATE SET
+            summary      = EXCLUDED.summary,
+            key_moments  = EXCLUDED.key_moments,
+            concepts     = EXCLUDED.concepts,
+            action_items = EXCLUDED.action_items,
+            generated_at = now()
+        """,
+        (session_id, summary, Json(key_moments), concepts or [], action_items or []),
+    )
+
+
+def get_session_notes(session_id: str) -> dict[str, Any] | None:
+    """Read notes back for the recap page. key_moments[].tMs is milliseconds."""
+    return fetch_one("SELECT * FROM session_notes WHERE session_id = %s", (session_id,))
+
+
+def save_transcript_segments(session_id: str, segments: list[Any]) -> int:
+    """Store the transcript. Accepts the AI pipeline's segment shape directly.
+
+    Replaces any existing transcript for the session, so re-running the
+    pipeline doesn't leave two copies interleaved.
+    """
+    rows = [
+        (
+            session_id,
+            ts_to_ms(_field(s, "start_sec", _field(s, "start_ts", 0))),
+            ts_to_ms(_field(s, "end_sec", _field(s, "end_ts", 0))),
+            _field(s, "speaker", "") or "",
+            _field(s, "text", "") or "",
+        )
+        for s in segments or []
+    ]
+    if not rows:
+        return 0
+
+    with cursor() as cur:
+        cur.execute("DELETE FROM transcript_segments WHERE session_id = %s", (session_id,))
+        cur.executemany(
+            """
+            INSERT INTO transcript_segments (session_id, start_ms, end_ms, speaker, text)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def get_transcript(session_id: str) -> list[dict[str, Any]]:
+    return fetch_all(
+        """
+        SELECT start_ms, end_ms, speaker, text
+        FROM transcript_segments
+        WHERE session_id = %s
+        ORDER BY start_ms
+        """,
+        (session_id,),
+    )
+
+
+# ------------------------------------------------------------------ messages
+
+
+def save_message(session_id: str, sender_id: str, body: str) -> None:
+    """Store one chat message. Call this from the websocket handler."""
+    execute(
+        "INSERT INTO messages (session_id, sender_id, body) VALUES (%s, %s, %s)",
+        (session_id, sender_id, body),
+    )
+
+
+def get_messages(session_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    """Chat history for a session, oldest first."""
+    rows = fetch_all(
+        """
+        SELECT ts, sender_id, body FROM messages
+        WHERE session_id = %s
+        ORDER BY ts DESC
+        LIMIT %s
+        """,
+        (session_id, limit),
+    )
+    return list(reversed(rows))
+
+
 # =====================================================================
 # 4. QUIZ - the six questions
 # =====================================================================
