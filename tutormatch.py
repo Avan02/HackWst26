@@ -202,6 +202,10 @@ CREATE TABLE IF NOT EXISTS tutor_profiles (
 
 CREATE TABLE IF NOT EXISTS sessions (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Whatever string the video app uses to name a room, e.g. "call-42".
+  -- Lets other parts of the system reference a session by the id they
+  -- already have instead of having to know our uuid.
+  room_key       text UNIQUE,
   student_id     text REFERENCES users(auth_sub),
   tutor_id       text REFERENCES users(auth_sub),
   subject        text,
@@ -274,6 +278,10 @@ CREATE INDEX IF NOT EXISTS messages_session_ts
 
 CREATE INDEX IF NOT EXISTS sessions_student
   ON sessions (student_id, created_at DESC);
+
+-- Migration for databases created before room_key existed. No-op otherwise.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS room_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS sessions_room_key ON sessions (room_key);
 """
 
 _pool: ConnectionPool | None = None
@@ -436,21 +444,59 @@ def create_session(
     *,
     mode: str = "video",
     room_url: str | None = None,
+    room_key: str | None = None,
 ) -> str:
     """Start a tutoring session. Returns the session id everything else keys off."""
     row = fetch_one(
         """
-        INSERT INTO sessions (student_id, tutor_id, subject, mode, room_url, status)
-        VALUES (%s, %s, %s, %s, %s, 'pending')
+        INSERT INTO sessions (student_id, tutor_id, subject, mode, room_url, room_key, status)
+        VALUES (%s, %s, %s, %s, %s, %s, 'pending')
         RETURNING id
         """,
-        (student_id, tutor_id, subject, mode, room_url),
+        (student_id, tutor_id, subject, mode, room_url, room_key),
+    )
+    return str(row["id"])
+
+
+def resolve_session(key: str) -> str:
+    """Turn any session identifier into the uuid the tables key off.
+
+    The video call names rooms with whatever string is in the URL, e.g.
+    "call-42". Rather than make that side adopt our uuids, anything that
+    isn't already one is treated as a room_key and looked up - created on
+    first sight if it doesn't exist yet.
+
+    So a recording can be saved against a room nobody formally booked, and
+    it still lands in the right place if a booking is created later.
+    """
+    key = str(key)
+
+    # Already one of our uuids?
+    row = fetch_one("SELECT id FROM sessions WHERE id::text = %s", (key,))
+    if row:
+        return str(row["id"])
+
+    row = fetch_one("SELECT id FROM sessions WHERE room_key = %s", (key,))
+    if row:
+        return str(row["id"])
+
+    row = fetch_one(
+        """
+        INSERT INTO sessions (room_key, status) VALUES (%s, 'live')
+        ON CONFLICT (room_key) DO UPDATE SET room_key = EXCLUDED.room_key
+        RETURNING id
+        """,
+        (key,),
     )
     return str(row["id"])
 
 
 def get_session(session_id: str) -> dict[str, Any] | None:
-    return fetch_one("SELECT * FROM sessions WHERE id = %s", (session_id,))
+    """Look up a session by uuid or by room_key."""
+    return fetch_one(
+        "SELECT * FROM sessions WHERE id::text = %s OR room_key = %s",
+        (str(session_id), str(session_id)),
+    )
 
 
 def set_session_status(
@@ -460,6 +506,7 @@ def set_session_status(
     recording_url: str | None = None,
 ) -> None:
     """Move a session along: pending -> paid -> live -> ended -> processed."""
+    session_id = resolve_session(session_id)
     execute(
         """
         UPDATE sessions SET
@@ -528,6 +575,7 @@ def save_session_notes(
         from tutormatch import save_session_notes
         save_session_notes(session_id, highlights, summary=...)
     """
+    session_id = resolve_session(session_id)
     key_moments = [
         {
             "tMs": ts_to_ms(_field(h, "start_ts", _field(h, "start_sec", 0))),
@@ -555,7 +603,9 @@ def save_session_notes(
 
 def get_session_notes(session_id: str) -> dict[str, Any] | None:
     """Read notes back for the recap page. key_moments[].tMs is milliseconds."""
-    return fetch_one("SELECT * FROM session_notes WHERE session_id = %s", (session_id,))
+    return fetch_one(
+        "SELECT * FROM session_notes WHERE session_id = %s", (resolve_session(session_id),)
+    )
 
 
 def save_transcript_segments(session_id: str, segments: list[Any]) -> int:
@@ -564,6 +614,7 @@ def save_transcript_segments(session_id: str, segments: list[Any]) -> int:
     Replaces any existing transcript for the session, so re-running the
     pipeline doesn't leave two copies interleaved.
     """
+    session_id = resolve_session(session_id)
     rows = [
         (
             session_id,
@@ -597,8 +648,36 @@ def get_transcript(session_id: str) -> list[dict[str, Any]]:
         WHERE session_id = %s
         ORDER BY start_ms
         """,
-        (session_id,),
+        (resolve_session(session_id),),
     )
+
+
+def save_pipeline_result(
+    session_id: str,
+    result: dict[str, Any],
+    *,
+    recording_url: str | None = None,
+) -> dict[str, int]:
+    """Store a whole transcription run in one call.
+
+    Takes `run_pipeline()`'s return value as-is - {"segments", "highlights"} -
+    so wiring the video app to the database is a single line:
+
+        from tutormatch import save_pipeline_result
+        save_pipeline_result(session_id, transcription, recording_url=str(save_path))
+
+    `session_id` can be the room id the video call already uses; it does not
+    have to be one of our uuids.
+    """
+    session_id = resolve_session(session_id)
+    segments = result.get("segments") or []
+    highlights = result.get("highlights") or []
+
+    n_segments = save_transcript_segments(session_id, segments)
+    save_session_notes(session_id, highlights)
+    set_session_status(session_id, "processed", recording_url=recording_url)
+
+    return {"segments": n_segments, "highlights": len(highlights)}
 
 
 # ------------------------------------------------------------------ messages
@@ -608,7 +687,7 @@ def save_message(session_id: str, sender_id: str, body: str) -> None:
     """Store one chat message. Call this from the websocket handler."""
     execute(
         "INSERT INTO messages (session_id, sender_id, body) VALUES (%s, %s, %s)",
-        (session_id, sender_id, body),
+        (resolve_session(session_id), sender_id, body),
     )
 
 
@@ -621,7 +700,7 @@ def get_messages(session_id: str, limit: int = 500) -> list[dict[str, Any]]:
         ORDER BY ts DESC
         LIMIT %s
         """,
-        (session_id, limit),
+        (resolve_session(session_id), limit),
     )
     return list(reversed(rows))
 
