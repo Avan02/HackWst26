@@ -1,4 +1,5 @@
 .env
 Video_Folder/*
+!Video_Folder/.gitkeep
 extracted_audio.mp3
 __pycache__/
