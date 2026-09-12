@@ -1,6 +1,10 @@
 # AI / transcripts
 google-genai
 pydantic
+python-dotenv
+fastapi
+uvicorn
+python-multipart
 
 # Shared
 python-dotenv
