@@ -8,6 +8,7 @@ open your own connections.
 
 from __future__ import annotations
 
+import atexit
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -39,7 +40,18 @@ def get_pool() -> ConnectionPool:
             kwargs={"row_factory": dict_row},
             open=True,
         )
+        # Close cleanly at exit. Without this the pool's worker threads are
+        # still alive during interpreter shutdown and Python 3.14 raises a
+        # noisy PythonFinalizationError after every script.
+        atexit.register(close_pool)
     return _pool
+
+
+def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        _pool.close()
+        _pool = None
 
 
 @contextmanager
