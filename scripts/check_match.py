@@ -7,8 +7,8 @@ and prints the ranking for each, with the expected top tutor.
 
 This matters more than it looks. Every other part of the stack either works or
 throws an exception - matching can silently return plausible-looking garbage.
-If a visual learner isn't ranking the diagram-heavy tutor first, the seed bios
-are probably too similar to each other to produce distinct vectors.
+If a visual learner isn't ranking the diagram-heavy tutor first, that tutor's
+style scores in tutormatch/fixtures.py need adjusting.
 """
 
 from __future__ import annotations

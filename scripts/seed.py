@@ -1,9 +1,9 @@
-"""Load the tutor pool into TigerData and embed each teaching-style bio.
+"""Load the tutor pool and their teaching-style scores into TigerData.
 
     python scripts/seed.py
 
-Safe to re-run - upserts by auth_sub. Re-run this after adding a GEMINI_API_KEY
-to replace the fallback vectors with real semantic ones.
+Safe to re-run - upserts by auth_sub. Re-run after editing any tutor's style
+scores in tutormatch/fixtures.py.
 """
 
 from __future__ import annotations

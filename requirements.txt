@@ -4,6 +4,3 @@ python-dotenv>=1.0
 
 # TigerData (Postgres + TimescaleDB + pgvector)
 psycopg[binary,pool]>=3.2
-
-# Gemini - embeds learner profiles and tutor bios for style matching
-google-genai>=0.8

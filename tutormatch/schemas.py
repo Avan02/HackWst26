@@ -44,17 +44,6 @@ class QuizQuestion(_Dictable):
     free_text: bool = False
 
 
-@dataclass
-class LearnerProfile(_Dictable):
-    user_id: str
-    subjects: list[str]
-    pace: str
-    goals: str
-    # The natural-language sentence that gets embedded. Kept so bad matches
-    # can be debugged by reading what we actually fed the model.
-    profile_sentence: str
-
-
 # --------------------------------------------------------------------- match
 
 
@@ -67,7 +56,7 @@ class TutorMatch(_Dictable):
     rating: float
     # 0..1 weighted blend of style similarity, subject overlap and rating.
     score: float
-    # Why this tutor fits this learner. Filled by Gemini, cached in the DB.
+    # Why this tutor fits this learner, built from the scores that ranked them.
     rationale: str = ""
     # Component scores, kept for debugging the ranking.
     style_similarity: float = 0.0

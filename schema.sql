@@ -41,13 +41,6 @@ CREATE TABLE IF NOT EXISTS tutor_profiles (
   rating            numeric(3,2) DEFAULT 4.5
 );
 
--- Migrations for databases created before matching switched from embeddings
--- to explicit style scoring. No-ops on a fresh database.
-ALTER TABLE tutor_profiles   ADD COLUMN IF NOT EXISTS style_affinity jsonb;
-ALTER TABLE tutor_profiles   DROP COLUMN IF EXISTS teaching_style_vector;
-ALTER TABLE learner_profiles DROP COLUMN IF EXISTS style_vector;
-ALTER TABLE learner_profiles DROP COLUMN IF EXISTS vark;
-
 /* --------------------------------------------------------------- sessions */
 
 CREATE TABLE IF NOT EXISTS sessions (

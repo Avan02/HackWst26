@@ -1,12 +1,11 @@
 """Seed data for the tutor pool.
 
-`scripts/seed.py` loads TUTORS into TigerData and embeds each bio.
-QUIZ_QUESTIONS defines the learning-style quiz whose answers become a
-learner's style vector.
+`scripts/seed.py` loads TUTORS into TigerData. QUIZ_QUESTIONS defines the
+learning-style quiz whose answers get scored against each tutor's `style`.
 
-The teaching-style bios are deliberately DISTINCT from one another. If they all
-sound alike their embeddings cluster together and the match ranking looks
-arbitrary - which is the single most likely way the demo falls flat.
+Each tutor's `style` scores them 0..1 on every possible quiz answer. Those
+numbers are what matching actually runs on, so they should agree with what the
+bio says - if they drift apart, the ranking stops matching the description.
 """
 
 from __future__ import annotations
