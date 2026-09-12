@@ -1,15 +1,9 @@
-flask>=3.0
+# User-data + matching layer.
+
 python-dotenv>=1.0
 
 # TigerData (Postgres + TimescaleDB + pgvector)
-psycopg[binary]>=3.2
-pgvector>=0.3
+psycopg[binary,pool]>=3.2
 
-# Vultr Object Storage (S3-compatible)
-boto3>=1.35
-
-# Gemini - embeddings for matching
+# Gemini - embeds learner profiles and tutor bios for style matching
 google-genai>=0.8
-
-# Auth0 JWT validation
-pyjwt[crypto]>=2.9

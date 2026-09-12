@@ -1,8 +1,8 @@
-"""Fixture data.
+"""Seed data for the tutor pool.
 
-Two jobs:
-  1. The mock routes return this, so Brayden can build templates before the DB exists.
-  2. `scripts/seed.py` loads TUTORS into TigerData as the real seed data.
+`scripts/seed.py` loads TUTORS into TigerData and embeds each bio.
+QUIZ_QUESTIONS defines the learning-style quiz whose answers become a
+learner's style vector.
 
 The teaching-style bios are deliberately DISTINCT from one another. If they all
 sound alike their embeddings cluster together and the match ranking looks
@@ -13,15 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .schemas import (
-    KeyMoment,
-    QuizOption,
-    QuizQuestion,
-    Session,
-    SessionNotes,
-    TutorMatch,
-    User,
-)
+from .schemas import QuizOption, QuizQuestion
 
 # ---------------------------------------------------------------------- quiz
 
@@ -238,104 +230,3 @@ TUTORS: list[TutorFixture] = [
         ["computer_science", "calculus"], 0.26, 4.6,
     ),
 ]
-
-
-# ---------------------------------------------------------------- mock users
-
-MOCK_STUDENT = User(
-    auth_sub="auth0|mock-student",
-    role="student",
-    name="Alex Rivera",
-    email="alex@example.com",
-    avatar_url="https://i.pravatar.cc/160?img=8",
-    wallet_address="7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-)
-
-# Hand-written so the mock match screen looks like the real thing.
-_MOCK_RATIONALES = {
-    "seed|tutor-01": "You said diagrams make things click - Maya draws the shape of "
-                     "every problem before touching the algebra.",
-    "seed|tutor-05": "Rosa leans on everyday analogies and a low-pressure pace, which "
-                     "fits your preference for intuition over formalism.",
-    "seed|tutor-12": "Emeka whiteboards structures visually before any code, matching "
-                     "how you said you take in new ideas.",
-}
-
-
-def mock_matches() -> list[TutorMatch]:
-    picks = ["seed|tutor-01", "seed|tutor-05", "seed|tutor-12"]
-    scores = [0.91, 0.84, 0.79]
-    out: list[TutorMatch] = []
-    for sub, score in zip(picks, scores):
-        t = next(x for x in TUTORS if x.auth_sub == sub)
-        out.append(
-            TutorMatch(
-                user=User(t.auth_sub, "tutor", t.name, t.email, t.avatar_url),
-                bio=t.bio,
-                subjects=t.subjects,
-                hourly_rate_sol=t.hourly_rate_sol,
-                rating=t.rating,
-                score=score,
-                rationale=_MOCK_RATIONALES[sub],
-            )
-        )
-    return out
-
-
-# -------------------------------------------------------------- mock session
-
-MOCK_SESSION_ID = "11111111-2222-3333-4444-555555555555"
-
-MOCK_SESSION = Session(
-    id=MOCK_SESSION_ID,
-    student_id=MOCK_STUDENT.auth_sub,
-    tutor_id="seed|tutor-01",
-    subject="calculus",
-    mode="video",
-    status="processed",
-    room_url="https://tutormatch.daily.co/mock-room",
-    recording_url="https://example.com/mock-recording.mp4",
-    started_at="2026-09-12T18:00:00.000Z",
-    ended_at="2026-09-12T18:42:00.000Z",
-)
-
-# Realistic notes payload. Brayden builds the recap page against this;
-# Evan's pipeline must produce this exact shape.
-MOCK_NOTES = SessionNotes(
-    session_id=MOCK_SESSION_ID,
-    summary=(
-        "Worked through the chain rule, starting from why composition requires it "
-        "rather than how to apply it. Alex could differentiate simple polynomials "
-        "confidently but stalled whenever a function appeared inside another. Maya "
-        "drew the outer box / inner box diagram three times with different examples "
-        "until Alex applied it unprompted to sin(3x^2). Ended with four practice "
-        "problems, three correct."
-    ),
-    key_moments=[
-        KeyMoment(154_000, "The outer/inner box diagram",
-                  "First time the chain rule is drawn visually - this is the "
-                  "explanation that finally landed."),
-        KeyMoment(428_000, "Alex misapplies the rule to sin(3x^2)",
-                  "The inner derivative gets dropped. Worth rewatching to see exactly "
-                  "where the slip happens."),
-        KeyMoment(612_000, "Correction and the peel the onion rule of thumb",
-                  "Maya reframes the mistake as a peeling order, which Alex repeats "
-                  "back correctly."),
-        KeyMoment(1_187_000, "Alex solves one unassisted",
-                  "The turning point - full chain rule applied with no prompting."),
-        KeyMoment(1_502_000, "Homework set and next session planned",
-                  "Four problems assigned; quotient rule flagged as the next gap."),
-    ],
-    concepts=[
-        "Chain rule",
-        "Function composition",
-        "Derivative of trigonometric functions",
-        "Power rule (review)",
-    ],
-    action_items=[
-        "Finish problems 3 and 4 from the practice set",
-        "Rewatch 2:34 if the outer/inner split stops being obvious",
-        "Come to next session with one quotient-rule question",
-    ],
-    generated_at="2026-09-12T18:47:12.000Z",
-)
