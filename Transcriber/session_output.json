@@ -1,0 +1,33 @@
+{
+  "video_path": "/Users/evangalloway01/Documents/TestMovie2.mov",
+  "segments": [
+    {
+      "start_sec": 0.4,
+      "end_sec": 15.4,
+      "start_ts": "00:00",
+      "end_ts": "00:15",
+      "text": "So we got the code to work. Now we're testing out another video. Uh I had a monster, a white monster, had a Coke Zero. I had had a lot of Cheetos. We had some butter chicken as well for lunch."
+    },
+    {
+      "start_sec": 17.2,
+      "end_sec": 19.0,
+      "start_ts": "00:17",
+      "end_ts": "00:19",
+      "text": "Uh everything's going pretty smooth, I would think."
+    }
+  ],
+  "highlights": [
+    {
+      "start_ts": "00:00",
+      "end_ts": "00:15",
+      "title": "Testing Code and Video Setup",
+      "note": "The speaker confirms that the code is working and begins testing another video."
+    },
+    {
+      "start_ts": "00:17",
+      "end_ts": "00:19",
+      "title": "Session Progress Update",
+      "note": "The speaker notes that everything is proceeding smoothly."
+    }
+  ]
+}
