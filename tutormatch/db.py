@@ -15,6 +15,7 @@ from typing import Any, Iterator
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Json
 from psycopg_pool import ConnectionPool
 
 from .config import settings
@@ -148,24 +149,22 @@ def save_learner_profile(
     goals: str,
     raw_answers: dict[str, Any],
     profile_sentence: str,
-    style_vector: list[float],
 ) -> None:
+    """Store the quiz answers. raw_answers is what matching scores against."""
     execute(
         """
         INSERT INTO learner_profiles
-            (user_id, subjects, pace, goals, raw_answers, profile_sentence, style_vector, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, now())
+            (user_id, subjects, pace, goals, raw_answers, profile_sentence, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, now())
         ON CONFLICT (user_id) DO UPDATE SET
             subjects         = EXCLUDED.subjects,
             pace             = EXCLUDED.pace,
             goals            = EXCLUDED.goals,
             raw_answers      = EXCLUDED.raw_answers,
             profile_sentence = EXCLUDED.profile_sentence,
-            style_vector     = EXCLUDED.style_vector,
             updated_at       = now()
         """,
-        (user_id, subjects, pace, goals, psycopg.types.json.Json(raw_answers),
-         profile_sentence, str(style_vector)),
+        (user_id, subjects, pace, goals, Json(raw_answers), profile_sentence),
     )
 
 

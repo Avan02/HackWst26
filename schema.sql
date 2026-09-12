@@ -19,24 +19,34 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS learner_profiles (
   user_id           text PRIMARY KEY REFERENCES users(auth_sub) ON DELETE CASCADE,
-  vark              jsonb,
   pace              text,
   goals             text,
   subjects          text[],
+  -- The quiz answers themselves, keyed by question id. This is what matching
+  -- scores against, so keep it readable: {"intake": "visual", "pace": "slow", ...}
   raw_answers       jsonb,
-  profile_sentence  text,          -- what we embedded; keep it for debugging matches
-  style_vector      vector(768),
+  profile_sentence  text,          -- human-readable summary, for debugging matches
   updated_at        timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS tutor_profiles (
-  user_id                text PRIMARY KEY REFERENCES users(auth_sub) ON DELETE CASCADE,
-  bio                    text,
-  subjects               text[],
-  teaching_style_vector  vector(768),
-  hourly_rate_sol        numeric(10,4),
-  rating                 numeric(3,2) DEFAULT 4.5
+  user_id           text PRIMARY KEY REFERENCES users(auth_sub) ON DELETE CASCADE,
+  bio               text,
+  subjects          text[],
+  -- How well this tutor suits each possible quiz answer, 0..1, shaped as
+  -- {"intake": {"visual": 1.0, "verbal": 0.3, ...}, "pace": {...}, ...}
+  -- Matching sums the tutor's affinity for whichever answers the student gave.
+  style_affinity    jsonb,
+  hourly_rate_sol   numeric(10,4),
+  rating            numeric(3,2) DEFAULT 4.5
 );
+
+-- Migrations for databases created before matching switched from embeddings
+-- to explicit style scoring. No-ops on a fresh database.
+ALTER TABLE tutor_profiles   ADD COLUMN IF NOT EXISTS style_affinity jsonb;
+ALTER TABLE tutor_profiles   DROP COLUMN IF EXISTS teaching_style_vector;
+ALTER TABLE learner_profiles DROP COLUMN IF EXISTS style_vector;
+ALTER TABLE learner_profiles DROP COLUMN IF EXISTS vark;
 
 /* --------------------------------------------------------------- sessions */
 
@@ -101,11 +111,6 @@ SELECT create_hypertable('transcript_segments', 'ts', if_not_exists => TRUE);
 SELECT create_hypertable('messages',            'ts', if_not_exists => TRUE);
 
 /* ----------------------------------------------------------------- indexes */
-
--- Vector search. HNSW with cosine distance, matching the `<=>` operator
--- used by the match query.
-CREATE INDEX IF NOT EXISTS tutor_style_hnsw
-  ON tutor_profiles USING hnsw (teaching_style_vector vector_cosine_ops);
 
 CREATE INDEX IF NOT EXISTS transcript_embedding_hnsw
   ON transcript_segments USING hnsw (embedding vector_cosine_ops);

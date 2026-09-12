@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tutormatch.config import settings  # noqa: E402
-from tutormatch.matching import match_for_answers, using_real_embeddings  # noqa: E402
+from tutormatch.matching import match_for_answers  # noqa: E402
 
 # (label, answers, subjects, who we'd expect near the top and why)
 PERSONAS = [
@@ -96,11 +96,6 @@ def main() -> int:
         print("TIGER_URL is not set. Put your TigerData connection string in .env")
         return 1
 
-    kind = "Gemini" if using_real_embeddings() else "LOCAL FALLBACK (no GEMINI_API_KEY)"
-    print(f"Embeddings: {kind}")
-    if not using_real_embeddings():
-        print("  ^ lexical only, not semantic. Rankings will improve a lot with a key.")
-
     for label, answers, subjects, expected in PERSONAS:
         sentence, matches = match_for_answers(answers, subjects, limit=3)
         print(f"\n{'=' * 70}\n{label}\n{'=' * 70}")
@@ -117,8 +112,8 @@ def main() -> int:
             )
 
     print(f"\n{'=' * 70}")
-    print("Eyeball these. If the expected tutor isn't at or near the top, the")
-    print("problem is almost always that the seed bios read too similarly.")
+    print("If an expected tutor isn't at or near the top, adjust that tutor's")
+    print("style scores in tutormatch/fixtures.py and re-run scripts/seed.py.")
     return 0
 
 
