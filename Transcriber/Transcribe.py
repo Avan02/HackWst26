@@ -112,15 +112,6 @@ def transcribe_with_word_timestamps(client: genai.Client, audio_file) -> List[di
  
  
 # ---------- step 2: group words into readable segments ----------
-def _parse_offset(value) -> float:
-    """Timestamps can come back as plain numbers or as duration strings
-    like '1.500s' - normalize either into a float number of seconds."""
-    if isinstance(value, (int, float)):
-        return float(value)
-    s = str(value).strip()
-    if s.endswith("s"):
-        s = s[:-1]
-    return float(s)
 
 def group_into_segments(words: List[dict], max_gap: float = 1.2, max_duration: float = 15.0) -> List[Segment]:
     """
