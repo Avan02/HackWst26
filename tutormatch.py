@@ -202,6 +202,10 @@ CREATE TABLE IF NOT EXISTS tutor_profiles (
 
 CREATE TABLE IF NOT EXISTS sessions (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- Whatever string the video app uses to name a room, e.g. "call-42".
+  -- Lets other parts of the system reference a session by the id they
+  -- already have instead of having to know our uuid.
+  room_key       text UNIQUE,
   student_id     text REFERENCES users(auth_sub),
   tutor_id       text REFERENCES users(auth_sub),
   subject        text,
@@ -274,6 +278,10 @@ CREATE INDEX IF NOT EXISTS messages_session_ts
 
 CREATE INDEX IF NOT EXISTS sessions_student
   ON sessions (student_id, created_at DESC);
+
+-- Migration for databases created before room_key existed. No-op otherwise.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS room_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS sessions_room_key ON sessions (room_key);
 """
 
 _pool: ConnectionPool | None = None
@@ -424,6 +432,277 @@ def save_learner_profile(
 
 def get_learner_profile(user_id: str) -> dict[str, Any] | None:
     return fetch_one("SELECT * FROM learner_profiles WHERE user_id = %s", (user_id,))
+
+
+# ----------------------------------------------------------------- sessions
+
+
+def create_session(
+    student_id: str,
+    tutor_id: str,
+    subject: str,
+    *,
+    mode: str = "video",
+    room_url: str | None = None,
+    room_key: str | None = None,
+) -> str:
+    """Start a tutoring session. Returns the session id everything else keys off."""
+    row = fetch_one(
+        """
+        INSERT INTO sessions (student_id, tutor_id, subject, mode, room_url, room_key, status)
+        VALUES (%s, %s, %s, %s, %s, %s, 'pending')
+        RETURNING id
+        """,
+        (student_id, tutor_id, subject, mode, room_url, room_key),
+    )
+    return str(row["id"])
+
+
+def resolve_session(key: str) -> str:
+    """Turn any session identifier into the uuid the tables key off.
+
+    The video call names rooms with whatever string is in the URL, e.g.
+    "call-42". Rather than make that side adopt our uuids, anything that
+    isn't already one is treated as a room_key and looked up - created on
+    first sight if it doesn't exist yet.
+
+    So a recording can be saved against a room nobody formally booked, and
+    it still lands in the right place if a booking is created later.
+    """
+    key = str(key)
+
+    # Already one of our uuids?
+    row = fetch_one("SELECT id FROM sessions WHERE id::text = %s", (key,))
+    if row:
+        return str(row["id"])
+
+    row = fetch_one("SELECT id FROM sessions WHERE room_key = %s", (key,))
+    if row:
+        return str(row["id"])
+
+    row = fetch_one(
+        """
+        INSERT INTO sessions (room_key, status) VALUES (%s, 'live')
+        ON CONFLICT (room_key) DO UPDATE SET room_key = EXCLUDED.room_key
+        RETURNING id
+        """,
+        (key,),
+    )
+    return str(row["id"])
+
+
+def get_session(session_id: str) -> dict[str, Any] | None:
+    """Look up a session by uuid or by room_key."""
+    return fetch_one(
+        "SELECT * FROM sessions WHERE id::text = %s OR room_key = %s",
+        (str(session_id), str(session_id)),
+    )
+
+
+def set_session_status(
+    session_id: str,
+    status: str,
+    *,
+    recording_url: str | None = None,
+) -> None:
+    """Move a session along: pending -> paid -> live -> ended -> processed."""
+    session_id = resolve_session(session_id)
+    execute(
+        """
+        UPDATE sessions SET
+            status        = %s,
+            recording_url = COALESCE(%s, recording_url),
+            started_at    = CASE WHEN %s = 'live'  THEN now() ELSE started_at END,
+            ended_at      = CASE WHEN %s = 'ended' THEN now() ELSE ended_at   END
+        WHERE id = %s
+        """,
+        (status, recording_url, status, status, session_id),
+    )
+
+
+# ------------------------------------------------------- transcripts + notes
+
+
+def ts_to_ms(value: Any) -> int:
+    """Normalise a timestamp into integer milliseconds.
+
+    The AI pipeline emits "MM:SS" (and sometimes "HH:MM:SS") strings because
+    they read well on screen. The video player needs a number to seek to.
+    Everything stored in the database is milliseconds, so the conversion
+    happens here, once, rather than in every caller.
+
+        ts_to_ms("02:34")   -> 154000
+        ts_to_ms(154.0)     -> 154000      (seconds as a number)
+    """
+    if isinstance(value, (int, float)):
+        return int(round(float(value) * 1000))
+
+    text = str(value).strip()
+    if not text:
+        return 0
+    if ":" not in text:
+        return int(round(float(text) * 1000))
+
+    parts = [float(p) for p in text.split(":")]
+    seconds = 0.0
+    for part in parts:            # handles MM:SS and HH:MM:SS alike
+        seconds = seconds * 60 + part
+    return int(round(seconds * 1000))
+
+
+def _field(obj: Any, name: str, default: Any = None) -> Any:
+    """Read a field off either a dict or an object (e.g. a pydantic model)."""
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
+
+
+def save_session_notes(
+    session_id: str,
+    highlights: list[Any],
+    *,
+    summary: str = "",
+    concepts: list[str] | None = None,
+    action_items: list[str] | None = None,
+) -> None:
+    """Store the AI-generated notes for a session.
+
+    `highlights` accepts the AI pipeline's own shape directly - dicts or
+    pydantic models with start_ts / title / note. Timestamps are converted to
+    integer milliseconds on the way in, so the website can feed them straight
+    to the player's seek call.
+
+        from tutormatch import save_session_notes
+        save_session_notes(session_id, highlights, summary=...)
+    """
+    session_id = resolve_session(session_id)
+    key_moments = [
+        {
+            "tMs": ts_to_ms(_field(h, "start_ts", _field(h, "start_sec", 0))),
+            "title": _field(h, "title", "") or "",
+            "why": _field(h, "note", _field(h, "why", "")) or "",
+        }
+        for h in highlights or []
+    ]
+
+    execute(
+        """
+        INSERT INTO session_notes
+            (session_id, summary, key_moments, concepts, action_items, generated_at)
+        VALUES (%s, %s, %s, %s, %s, now())
+        ON CONFLICT (session_id) DO UPDATE SET
+            summary      = EXCLUDED.summary,
+            key_moments  = EXCLUDED.key_moments,
+            concepts     = EXCLUDED.concepts,
+            action_items = EXCLUDED.action_items,
+            generated_at = now()
+        """,
+        (session_id, summary, Json(key_moments), concepts or [], action_items or []),
+    )
+
+
+def get_session_notes(session_id: str) -> dict[str, Any] | None:
+    """Read notes back for the recap page. key_moments[].tMs is milliseconds."""
+    return fetch_one(
+        "SELECT * FROM session_notes WHERE session_id = %s", (resolve_session(session_id),)
+    )
+
+
+def save_transcript_segments(session_id: str, segments: list[Any]) -> int:
+    """Store the transcript. Accepts the AI pipeline's segment shape directly.
+
+    Replaces any existing transcript for the session, so re-running the
+    pipeline doesn't leave two copies interleaved.
+    """
+    session_id = resolve_session(session_id)
+    rows = [
+        (
+            session_id,
+            ts_to_ms(_field(s, "start_sec", _field(s, "start_ts", 0))),
+            ts_to_ms(_field(s, "end_sec", _field(s, "end_ts", 0))),
+            _field(s, "speaker", "") or "",
+            _field(s, "text", "") or "",
+        )
+        for s in segments or []
+    ]
+    if not rows:
+        return 0
+
+    with cursor() as cur:
+        cur.execute("DELETE FROM transcript_segments WHERE session_id = %s", (session_id,))
+        cur.executemany(
+            """
+            INSERT INTO transcript_segments (session_id, start_ms, end_ms, speaker, text)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def get_transcript(session_id: str) -> list[dict[str, Any]]:
+    return fetch_all(
+        """
+        SELECT start_ms, end_ms, speaker, text
+        FROM transcript_segments
+        WHERE session_id = %s
+        ORDER BY start_ms
+        """,
+        (resolve_session(session_id),),
+    )
+
+
+def save_pipeline_result(
+    session_id: str,
+    result: dict[str, Any],
+    *,
+    recording_url: str | None = None,
+) -> dict[str, int]:
+    """Store a whole transcription run in one call.
+
+    Takes `run_pipeline()`'s return value as-is - {"segments", "highlights"} -
+    so wiring the video app to the database is a single line:
+
+        from tutormatch import save_pipeline_result
+        save_pipeline_result(session_id, transcription, recording_url=str(save_path))
+
+    `session_id` can be the room id the video call already uses; it does not
+    have to be one of our uuids.
+    """
+    session_id = resolve_session(session_id)
+    segments = result.get("segments") or []
+    highlights = result.get("highlights") or []
+
+    n_segments = save_transcript_segments(session_id, segments)
+    save_session_notes(session_id, highlights)
+    set_session_status(session_id, "processed", recording_url=recording_url)
+
+    return {"segments": n_segments, "highlights": len(highlights)}
+
+
+# ------------------------------------------------------------------ messages
+
+
+def save_message(session_id: str, sender_id: str, body: str) -> None:
+    """Store one chat message. Call this from the websocket handler."""
+    execute(
+        "INSERT INTO messages (session_id, sender_id, body) VALUES (%s, %s, %s)",
+        (resolve_session(session_id), sender_id, body),
+    )
+
+
+def get_messages(session_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    """Chat history for a session, oldest first."""
+    rows = fetch_all(
+        """
+        SELECT ts, sender_id, body FROM messages
+        WHERE session_id = %s
+        ORDER BY ts DESC
+        LIMIT %s
+        """,
+        (resolve_session(session_id), limit),
+    )
+    return list(reversed(rows))
 
 
 # =====================================================================
