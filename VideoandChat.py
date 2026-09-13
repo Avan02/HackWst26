@@ -5,6 +5,8 @@ from fastapi.responses import HTMLResponse
 from pathlib import Path
 from fastapi import UploadFile, File, Form
 from Transcriber.Transcribe import run_pipeline
+from tutormatch import save_pipeline_result, get_transcript, get_session_notes
+from ice_servers import get_ice_servers
 
 app = FastAPI(title="TutorMatch Backend")
 
@@ -50,6 +52,11 @@ async def upload_recording(
     if role == "tutor":
       output_json_path = VIDEO_FOLDER / f"{session_id}_{role}_output.json"
       transcription = run_pipeline(str(save_path), output_path=str(output_json_path))
+      if transcription:
+        try:
+          save_pipeline_result(session_id, transcription, recording_url=str(save_path))
+        except Exception as db_err:
+          print(f"Warning: could not save transcript to database: {db_err}")
 
     return {"status": "ok", "saved_to": str(save_path), "transcription": transcription}
 
@@ -294,6 +301,29 @@ async def precall_page():
 @app.get("/call")
 async def call_page():
     return HTMLResponse(CALL_HTML)
+
+
+@app.get("/ice-servers")
+def ice_servers():
+    """STUN + TURN servers for the call page. Credentials come from Cloudflare."""
+    return {"iceServers": get_ice_servers()}
+
+
+@app.get("/transcript/{session_id}")
+async def transcript_page(session_id: str):
+    return HTMLResponse(TRANSCRIPT_HTML)
+
+
+@app.get("/api/transcript/{session_id}")
+async def api_transcript(session_id: str):
+    segments = get_transcript(session_id)
+    notes = get_session_notes(session_id)
+    return {
+        "session_id": session_id,
+        "ready": bool(segments),
+        "segments": segments,
+        "notes": notes,
+    }
 
 
 # ============================================================
@@ -713,6 +743,7 @@ CALL_HTML = """
     <button class="ghost" id="shareBtn" onclick="toggleShare()" disabled>Share Screen</button>
     <button class="ghost" id="chatBtn" onclick="toggleChat()" disabled>Toggle Chat</button>
         <button class="ghost" id="endBtn" onclick="endCall()" disabled>End Call</button>
+        <button class="ghost" id="transcriptBtn" onclick="viewTranscript()" style="display:none;">View Transcript</button>
   </div>
 </div>
 
@@ -740,12 +771,26 @@ let recordedChunks = [];
 const isPolite = myClientId === 'tutor';
 const pendingCandidates = [];
 
-const servers = {
+// Used if /ice-servers can't be reached. Direct connections still work on most
+// networks; this only loses the TURN relay for restrictive ones.
+const FALLBACK_ICE = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
   ]
 };
+
+// STUN + TURN from the server, which trades our Cloudflare token for
+// short-lived relay credentials so the token never reaches the browser.
+async function loadIceServers() {
+  try {
+    const resp = await fetch('/ice-servers');
+    if (resp.ok) return await resp.json();
+  } catch (err) {
+    console.warn('Could not load ICE servers, using STUN only:', err);
+  }
+  return FALLBACK_ICE;
+}
 
 function setStatus(live, text) {
   document.getElementById('statusDot').className = 'status-dot' + (live ? ' live' : '');
@@ -789,7 +834,7 @@ async function start() {
     startRecording();
   }
 
-  pc = new RTCPeerConnection(servers);
+  pc = new RTCPeerConnection(await loadIceServers());
   localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
   pc.ontrack = (e) => {
@@ -978,7 +1023,12 @@ async function endCall() {
   if (ws) ws.close();
   if (pc) pc.close();
   if (localStream) localStream.getTracks().forEach(t => t.stop());
+  document.getElementById('transcriptBtn').style.display = 'inline-block';
   endBtn.textContent = 'Call Ended';
+}
+
+function viewTranscript() {
+  window.open(`/transcript/${sessionId}`, '_blank');
 }
 
 function toggleChat() {
@@ -999,6 +1049,98 @@ function sendChat() {
 document.getElementById('chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter') { e.preventDefault(); sendChat(); }
 });
+</script>
+</body>
+</html>
+"""
+
+
+TRANSCRIPT_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>TutorMatch - Transcript</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+""" + SHARED_CSS + """
+.card.wide { max-width: 900px; }
+.moment {
+  border-left: 3px solid var(--green);
+  padding: 10px 14px;
+  margin-bottom: 10px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 8px;
+}
+.moment .t { color: var(--green); font-weight: 600; margin-right: 8px; }
+.segment { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+.segment .t { color: #9fd; opacity: 0.8; margin-right: 8px; font-variant-numeric: tabular-nums; }
+#status { opacity: 0.8; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+<div class="card wide">
+  <h2>Session Transcript</h2>
+  <div id="status">Loading...</div>
+  <div id="notesSection" style="display:none;">
+    <h3>Highlights</h3>
+    <div id="moments"></div>
+  </div>
+  <div id="transcriptSection" style="display:none;">
+    <h3>Full Transcript</h3>
+    <div id="segments"></div>
+  </div>
+</div>
+
+<script>
+function fmt(ms) {
+  const total = Math.floor((ms || 0) / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+async function load() {
+  const sessionId = window.location.pathname.split('/').pop();
+  const statusEl = document.getElementById('status');
+  try {
+    const resp = await fetch(`/api/transcript/${sessionId}`);
+    const data = await resp.json();
+
+    if (!data.ready) {
+      statusEl.textContent = 'Transcript is still processing - check back in a moment.';
+      setTimeout(load, 4000);
+      return;
+    }
+
+    statusEl.style.display = 'none';
+
+    const moments = (data.notes && data.notes.key_moments) || [];
+    if (moments.length) {
+      document.getElementById('notesSection').style.display = 'block';
+      document.getElementById('moments').innerHTML = moments.map(m => `
+        <div class="moment"><span class="t">${fmt(m.tMs)}</span><strong>${m.title || ''}</strong><div>${m.why || ''}</div></div>
+      `).join('');
+    }
+
+    const segments = data.segments || [];
+    if (segments.length) {
+      document.getElementById('transcriptSection').style.display = 'block';
+      document.getElementById('segments').innerHTML = segments.map(s => `
+        <div class="segment"><span class="t">${fmt(s.start_ms)}</span>${s.text || ''}</div>
+      `).join('');
+    }
+
+    if (!moments.length && !segments.length) {
+      statusEl.style.display = 'block';
+      statusEl.textContent = 'No transcript found for this session.';
+    }
+  } catch (err) {
+    console.error(err);
+    statusEl.textContent = 'Could not load transcript.';
+  }
+}
+
+load();
 </script>
 </body>
 </html>

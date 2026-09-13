@@ -54,12 +54,28 @@ def extract_audio(video_path: str, audio_path: str = "extracted_audio.mp3") -> s
     return audio_path
  
  
-def upload_and_wait(client: genai.Client, path: str):
-    """Upload via the Files API and wait until Gemini has finished processing it."""
+def upload_and_wait(client: genai.Client, path: str, max_wait_seconds: int = 180):
+    """Upload via the Files API and wait until Gemini has finished processing it.
+
+    Bails out after max_wait_seconds instead of polling forever, so a stuck
+    upload fails loudly with a clear error rather than freezing the server.
+    """
     uploaded = client.files.upload(file=path)
+    waited = 0
     while getattr(uploaded, "state", None) and uploaded.state.name == "PROCESSING":
+        if waited >= max_wait_seconds:
+            raise RuntimeError(
+                f"Gemini file processing did not finish within {max_wait_seconds}s "
+                f"(file: {uploaded.name}, last state: {uploaded.state.name})"
+            )
+        print(f"  ...still processing on Gemini's side ({waited}s elapsed)")
         time.sleep(2)
+        waited += 2
         uploaded = client.files.get(name=uploaded.name)
+
+    if getattr(uploaded, "state", None) and uploaded.state.name == "FAILED":
+        raise RuntimeError(f"Gemini failed to process the uploaded file: {uploaded.name}")
+
     return uploaded
 
 def _parse_offset(value) -> float:
@@ -112,15 +128,6 @@ def transcribe_with_word_timestamps(client: genai.Client, audio_file) -> List[di
  
  
 # ---------- step 2: group words into readable segments ----------
-def _parse_offset(value) -> float:
-    """Timestamps can come back as plain numbers or as duration strings
-    like '1.500s' - normalize either into a float number of seconds."""
-    if isinstance(value, (int, float)):
-        return float(value)
-    s = str(value).strip()
-    if s.endswith("s"):
-        s = s[:-1]
-    return float(s)
 
 def group_into_segments(words: List[dict], max_gap: float = 1.2, max_duration: float = 15.0) -> List[Segment]:
     """
