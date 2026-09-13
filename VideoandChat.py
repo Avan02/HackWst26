@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi import UploadFile, File, Form
 from Transcriber.Transcribe import run_pipeline
 from tutormatch import save_pipeline_result, get_transcript, get_session_notes
+from ice_servers import get_ice_servers
 
 app = FastAPI(title="TutorMatch Backend")
 
@@ -300,6 +301,12 @@ async def precall_page():
 @app.get("/call")
 async def call_page():
     return HTMLResponse(CALL_HTML)
+
+
+@app.get("/ice-servers")
+def ice_servers():
+    """STUN + TURN servers for the call page. Credentials come from Cloudflare."""
+    return {"iceServers": get_ice_servers()}
 
 
 @app.get("/transcript/{session_id}")
@@ -764,12 +771,26 @@ let recordedChunks = [];
 const isPolite = myClientId === 'tutor';
 const pendingCandidates = [];
 
-const servers = {
+// Used if /ice-servers can't be reached. Direct connections still work on most
+// networks; this only loses the TURN relay for restrictive ones.
+const FALLBACK_ICE = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
     { urls: 'stun:stun1.l.google.com:19302' },
   ]
 };
+
+// STUN + TURN from the server, which trades our Cloudflare token for
+// short-lived relay credentials so the token never reaches the browser.
+async function loadIceServers() {
+  try {
+    const resp = await fetch('/ice-servers');
+    if (resp.ok) return await resp.json();
+  } catch (err) {
+    console.warn('Could not load ICE servers, using STUN only:', err);
+  }
+  return FALLBACK_ICE;
+}
 
 function setStatus(live, text) {
   document.getElementById('statusDot').className = 'status-dot' + (live ? ' live' : '');
@@ -813,7 +834,7 @@ async function start() {
     startRecording();
   }
 
-  pc = new RTCPeerConnection(servers);
+  pc = new RTCPeerConnection(await loadIceServers());
   localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
   pc.ontrack = (e) => {
