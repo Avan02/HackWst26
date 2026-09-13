@@ -22,3 +22,8 @@ Video_Folder/*
 !Video_Folder/.gitkeep
 extracted_audio.mp3
 __pycache__/
+
+# Local databases - these can hold user data and must never be committed
+instance/
+*.db
+*.sqlite3

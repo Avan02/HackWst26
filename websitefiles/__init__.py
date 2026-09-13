@@ -1,50 +1,34 @@
-# from flask import Flask
-# def create_app():  
-#     app = Flask(__name__)
-#     app.config['SECRET_KEY'] = 'seckeymine' 
-#     from .views import views
-#     from .auth import auth
-#     app.register_blueprint(views, url_prefix='/')
-#     app.register_blueprint(auth, url_prefix='/')
-    
-#     return app
+import logging
+import os
+import secrets
+from pathlib import Path
 
-
+from dotenv import load_dotenv
 from flask import Flask
-from flask_sqlalchemy import SQLAlchemy
-from flask_login import LoginManager
 
-db = SQLAlchemy()
-DB_NAME = "database.db"
+# Load .env from the repo root regardless of where the app was started.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+log = logging.getLogger(__name__)
 
 
 def create_app():
     app = Flask(__name__)
-    app.config['SECRET_KEY'] = 'seckeymine'
-    app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{DB_NAME}'
-    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-    db.init_app(app)
+    # Signs the session cookie that remembers who's logged in. It must come from
+    # .env: the repo is public, so a key written here would let anyone forge a
+    # session cookie and be logged in as any user.
+    secret = os.getenv("AUTH0_SECRET", "").strip()
+    if not secret:
+        log.warning("AUTH0_SECRET is not set - using a temporary key; logins reset on restart")
+        secret = secrets.token_hex(32)
+    app.config["SECRET_KEY"] = secret
 
+    from .auth import auth, init_auth
     from .views import views
-    from .auth import auth
 
-    app.register_blueprint(views, url_prefix='/')
-    app.register_blueprint(auth, url_prefix='/')
-
-    # Models must be imported before create_all() so SQLAlchemy knows the tables.
-    from .models import User, Note
-
-    with app.app_context():
-        db.create_all()
-
-    login_manager = LoginManager()
-    login_manager.login_view = 'auth.login'
-    login_manager.login_message_category = 'error'
-    login_manager.init_app(app)
-
-    @login_manager.user_loader
-    def load_user(user_id):
-        return db.session.get(User, int(user_id))
+    init_auth(app)
+    app.register_blueprint(views, url_prefix="/")
+    app.register_blueprint(auth, url_prefix="/")
 
     return app
