@@ -321,7 +321,13 @@ async def login(request: Request):
 
 @app.get("/callback")
 async def callback(request: Request):
-    token = await oauth.auth0.authorize_access_token(request)
+    try:
+        token = await oauth.auth0.authorize_access_token(request)
+    except Exception as auth_err:
+        return HTMLResponse(
+            f"<h1>Login failed</h1><p>{auth_err}</p><p><a href=\"/\">Back to home</a></p>",
+            status_code=400,
+        )
     userinfo = token.get("userinfo") or {}
     auth_sub = userinfo.get("sub")
     if not auth_sub:
@@ -368,7 +374,10 @@ async def call_page(request: Request, session: str = "", role: str = ""):
     if not user:
         return RedirectResponse(url="/login")
     if session and role:
-        attach_participant(session, role, user["sub"])
+        try:
+            attach_participant(session, role, user["sub"])
+        except Exception as db_err:
+            print(f"Warning: could not attach participant to session: {db_err}")
     return HTMLResponse(CALL_HTML)
 
 
