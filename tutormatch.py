@@ -490,6 +490,26 @@ def resolve_session(key: str) -> str:
     )
     return str(row["id"])
 
+def attach_participant(session_id: str, role: str, auth_sub: str) -> None:
+    """Record who actually joined a video-call session, keyed by their Auth0 sub.
+
+    Call this when someone joins /call - it fills in the sessions row's
+    student_id or tutor_id, even for ad-hoc sessions created by resolve_session
+    that were never formally booked.
+    """
+    session_id = resolve_session(session_id)
+    if role == "tutor":
+        execute("UPDATE sessions SET tutor_id = %s WHERE id = %s", (auth_sub, session_id))
+    else:
+        execute("UPDATE sessions SET student_id = %s WHERE id = %s", (auth_sub, session_id))
+
+
+def get_session_participants(session_id: str) -> dict[str, Any] | None:
+    """The two Auth0 subs (student_id, tutor_id) attached to a session, for access checks."""
+    return fetch_one(
+        "SELECT student_id, tutor_id FROM sessions WHERE id::text = %s OR room_key = %s",
+        (str(session_id), str(session_id)),
+    )
 
 def get_session(session_id: str) -> dict[str, Any] | None:
     """Look up a session by uuid or by room_key."""
