@@ -16,8 +16,10 @@ import os
 from functools import wraps
 from urllib.parse import urlencode
 
+from authlib.integrations.base_client.errors import OAuthError
 from authlib.integrations.flask_client import OAuth
 from flask import Blueprint, redirect, request, session, url_for
+from markupsafe import escape
 
 from tutormatch import upsert_user
 
@@ -120,7 +122,19 @@ def callback():
     if client is None:
         return _not_configured()
 
-    token = client.authorize_access_token()
+    try:
+        token = client.authorize_access_token()
+    except OAuthError as err:
+        # Auth0 reports failures here too: a cancelled login, a misconfigured
+        # connection, an expired attempt. Show why instead of crashing with a 500.
+        log.warning("Auth0 login failed: %s", err)
+        # The description comes from the URL, so escape it before echoing it
+        # back into HTML - otherwise it's a reflected XSS hole.
+        reason = escape(err.description or err.error or "unknown error")
+        home = escape(url_for("views.home"))
+        return (f"<h2>Login didn't complete</h2><p>{reason}</p>"
+                f'<p><a href="{home}">Back to home</a></p>'), 400
+
     info = token["userinfo"]
 
     # The link between Auth0 and TigerData: make sure this person has a row in
