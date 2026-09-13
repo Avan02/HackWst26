@@ -7,7 +7,9 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from pathlib import Path
 from fastapi import UploadFile, File, Form
 from starlette.middleware.sessions import SessionMiddleware
-from authlib.integrations.starlette_client import OAuth
+from sqlalchemy import create_engine, Column, Integer, String
+from sqlalchemy.orm import sessionmaker, declarative_base
+from werkzeug.security import generate_password_hash, check_password_hash
 from Transcriber.Transcribe import run_pipeline
 from tutormatch import (
     save_pipeline_result,
@@ -23,14 +25,29 @@ app = FastAPI(title="TutorMatch Backend")
 
 app.add_middleware(SessionMiddleware, secret_key=os.getenv("AUTH0_SECRET"))
 
-oauth = OAuth()
-oauth.register(
-    "auth0",
-    client_id=os.getenv("AUTH0_CLIENT_ID"),
-    client_secret=os.getenv("AUTH0_CLIENT_SECRET"),
-    client_kwargs={"scope": "openid profile email"},
-    server_metadata_url=f'https://{os.getenv("AUTH0_DOMAIN")}/.well-known/openid-configuration',
-)
+WEBSITE_DB_PATH = Path(__file__).parent / "instance" / "database.db"
+WEBSITE_DB_PATH.parent.mkdir(exist_ok=True)
+web_engine = create_engine(f"sqlite:///{WEBSITE_DB_PATH}")
+WebSession = sessionmaker(bind=web_engine)
+WebBase = declarative_base()
+
+
+class WebUser(WebBase):
+    """Mirrors websitefiles/models.py's User table.
+
+    Defined again here in plain SQLAlchemy (rather than Flask-SQLAlchemy) so
+    this FastAPI app can read and write the exact same 'user' table without
+    needing a Flask app context.
+    """
+
+    __tablename__ = "user"
+    id = Column(Integer, primary_key=True)
+    email = Column(String(150), unique=True)
+    username = Column(String(150), unique=True)
+    password = Column(String(256))
+
+
+WebBase.metadata.create_all(web_engine)
 
 def get_current_user(request: Request) -> dict | None:
     return request.session.get("user")
@@ -313,50 +330,172 @@ async def call_channel(websocket: WebSocket, session_id: str, client_id: str):
 # ============================================================
 # 3. ROUTES
 # ============================================================
-@app.get("/login")
-async def login(request: Request):
-    redirect_uri = request.url_for("callback")
-    return await oauth.auth0.authorize_redirect(request, redirect_uri)
+AUTH_FORM_CSS = """
+.form-row { margin-bottom: 14px; }
+.form-row label { display:block; margin-bottom: 6px; font-size: 13px; color: var(--text-dim); }
+.form-row input {
+  width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(255,255,255,0.15);
+  background: rgba(255,255,255,0.06); color: var(--text); font-size: 14px; box-sizing: border-box;
+}
+.error-msg { color: #ff8080; margin-bottom: 14px; font-size: 14px; }
+"""
+
+LOGIN_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>TutorMatch - Log In</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+""" + SHARED_CSS + AUTH_FORM_CSS + """
+</style>
+</head>
+<body>
+<div class="card" style="max-width: 420px;">
+  <h2>Log In</h2>
+  __ERROR_HTML__
+  <form method="POST" action="/login">
+    <div class="form-row">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required>
+    </div>
+    <div class="form-row">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required>
+    </div>
+    <button class="primary" type="submit" style="width:100%;">Log In</button>
+  </form>
+  <p style="margin-top:14px; font-size:13px; color: var(--text-dim);">
+    Don't have an account? <a href="/signup">Sign up</a>
+  </p>
+</div>
+</body>
+</html>
+"""
+
+SIGNUP_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>TutorMatch - Sign Up</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+""" + SHARED_CSS + AUTH_FORM_CSS + """
+</style>
+</head>
+<body>
+<div class="card" style="max-width: 420px;">
+  <h2>Sign Up</h2>
+  __ERROR_HTML__
+  <form method="POST" action="/signup">
+    <div class="form-row">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" required>
+    </div>
+    <div class="form-row">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" required>
+    </div>
+    <div class="form-row">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" required>
+    </div>
+    <div class="form-row">
+      <label for="confirm_password">Confirm Password</label>
+      <input type="password" id="confirm_password" name="confirm_password" required>
+    </div>
+    <button class="primary" type="submit" style="width:100%;">Sign Up</button>
+  </form>
+  <p style="margin-top:14px; font-size:13px; color: var(--text-dim);">
+    Already have an account? <a href="/login">Log in</a>
+  </p>
+</div>
+</body>
+</html>
+"""
 
 
-@app.get("/callback")
-async def callback(request: Request):
+def _sync_to_tigerdata(web_user: "WebUser") -> None:
+    """TigerData's sessions table keys participants off users.auth_sub, which
+    assumed Auth0 logins. There's no Auth0 sub anymore, so this project's
+    email address is used as that same stable identifier instead."""
     try:
-        token = await oauth.auth0.authorize_access_token(request)
-    except Exception as auth_err:
-        return HTMLResponse(
-            f"<h1>Login failed</h1><p>{auth_err}</p><p><a href=\"/\">Back to home</a></p>",
-            status_code=400,
-        )
-    userinfo = token.get("userinfo") or {}
-    auth_sub = userinfo.get("sub")
-    if not auth_sub:
-        return RedirectResponse(url="/login")
+        upsert_user(auth_sub=web_user.email, name=web_user.username, email=web_user.email)
+    except Exception as db_err:
+        print(f"Warning: could not sync user to TigerData: {db_err}")
 
-    upsert_user(
-        auth_sub,
-        name=userinfo.get("name"),
-        email=userinfo.get("email"),
-        avatar_url=userinfo.get("picture"),
-    )
 
-    request.session["user"] = {
-        "sub": auth_sub,
-        "name": userinfo.get("name"),
-        "email": userinfo.get("email"),
-    }
-    return RedirectResponse(url="/")
+@app.get("/login")
+async def login_page():
+    return HTMLResponse(LOGIN_HTML.replace("__ERROR_HTML__", ""))
+
+
+@app.post("/login")
+async def login_submit(request: Request):
+    form = await request.form()
+    email = (form.get("email") or "").strip()
+    password = form.get("password") or ""
+
+    with WebSession() as db:
+        web_user = db.query(WebUser).filter_by(email=email).first()
+
+    if not web_user or not check_password_hash(web_user.password, password):
+        error_html = '<p class="error-msg">Incorrect email or password.</p>'
+        return HTMLResponse(LOGIN_HTML.replace("__ERROR_HTML__", error_html), status_code=400)
+
+    _sync_to_tigerdata(web_user)
+    request.session["user"] = {"sub": web_user.email, "name": web_user.username, "email": web_user.email}
+    return RedirectResponse(url="/", status_code=303)
+
+
+@app.get("/signup")
+async def signup_page():
+    return HTMLResponse(SIGNUP_HTML.replace("__ERROR_HTML__", ""))
+
+
+@app.post("/signup")
+async def signup_submit(request: Request):
+    form = await request.form()
+    email = (form.get("email") or "").strip()
+    username = (form.get("username") or "").strip()
+    password1 = form.get("password") or ""
+    password2 = form.get("confirm_password") or ""
+
+    with WebSession() as db:
+        error = None
+        if db.query(WebUser).filter_by(email=email).first():
+            error = "That email already has an account."
+        elif db.query(WebUser).filter_by(username=username).first():
+            error = "That username is taken."
+        elif len(email) < 4:
+            error = "Email must be longer than 3 characters."
+        elif len(username) < 2:
+            error = "Username must be longer than 1 character."
+        elif len(password1) < 7:
+            error = "Password must be at least 7 characters."
+        elif password1 != password2:
+            error = "Passwords don't match."
+
+        if error:
+            return HTMLResponse(
+                SIGNUP_HTML.replace("__ERROR_HTML__", f'<p class="error-msg">{error}</p>'),
+                status_code=400,
+            )
+
+        web_user = WebUser(email=email, username=username, password=generate_password_hash(password1))
+        db.add(web_user)
+        db.commit()
+        db.refresh(web_user)
+
+    _sync_to_tigerdata(web_user)
+    request.session["user"] = {"sub": web_user.email, "name": web_user.username, "email": web_user.email}
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.get("/logout")
 async def logout(request: Request):
     request.session.clear()
-    domain = os.getenv("AUTH0_DOMAIN")
-    client_id = os.getenv("AUTH0_CLIENT_ID")
-    return_to = os.getenv("APP_BASE_URL", "http://localhost:8000")
-    return RedirectResponse(
-        url=f"https://{domain}/v2/logout?client_id={client_id}&returnTo={return_to}"
-    )
+    return RedirectResponse(url="/")
 
 @app.get("/")
 async def root():
