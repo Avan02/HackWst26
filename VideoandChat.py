@@ -1,14 +1,39 @@
 import json
+import os
 from typing import Dict, List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import Request, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse
 from pathlib import Path
 from fastapi import UploadFile, File, Form
+from starlette.middleware.sessions import SessionMiddleware
+from authlib.integrations.starlette_client import OAuth
 from Transcriber.Transcribe import run_pipeline
-from tutormatch import save_pipeline_result, get_transcript, get_session_notes
+from tutormatch import (
+    save_pipeline_result,
+    get_transcript,
+    get_session_notes,
+    upsert_user,
+    attach_participant,
+    get_session_participants,
+)
 from ice_servers import get_ice_servers
 
 app = FastAPI(title="TutorMatch Backend")
+
+app.add_middleware(SessionMiddleware, secret_key=os.getenv("AUTH0_SECRET"))
+
+oauth = OAuth()
+oauth.register(
+    "auth0",
+    client_id=os.getenv("AUTH0_CLIENT_ID"),
+    client_secret=os.getenv("AUTH0_CLIENT_SECRET"),
+    client_kwargs={"scope": "openid profile email"},
+    server_metadata_url=f'https://{os.getenv("AUTH0_DOMAIN")}/.well-known/openid-configuration',
+)
+
+def get_current_user(request: Request) -> dict | None:
+    return request.session.get("user")
 
 
 # ============================================================
@@ -288,6 +313,45 @@ async def call_channel(websocket: WebSocket, session_id: str, client_id: str):
 # ============================================================
 # 3. ROUTES
 # ============================================================
+@app.get("/login")
+async def login(request: Request):
+    redirect_uri = request.url_for("callback")
+    return await oauth.auth0.authorize_redirect(request, redirect_uri)
+
+
+@app.get("/callback")
+async def callback(request: Request):
+    token = await oauth.auth0.authorize_access_token(request)
+    userinfo = token.get("userinfo") or {}
+    auth_sub = userinfo.get("sub")
+    if not auth_sub:
+        return RedirectResponse(url="/login")
+
+    upsert_user(
+        auth_sub,
+        name=userinfo.get("name"),
+        email=userinfo.get("email"),
+        avatar_url=userinfo.get("picture"),
+    )
+
+    request.session["user"] = {
+        "sub": auth_sub,
+        "name": userinfo.get("name"),
+        "email": userinfo.get("email"),
+    }
+    return RedirectResponse(url="/")
+
+
+@app.get("/logout")
+async def logout(request: Request):
+    request.session.clear()
+    domain = os.getenv("AUTH0_DOMAIN")
+    client_id = os.getenv("AUTH0_CLIENT_ID")
+    return_to = os.getenv("APP_BASE_URL", "http://localhost:8000")
+    return RedirectResponse(
+        url=f"https://{domain}/v2/logout?client_id={client_id}&returnTo={return_to}"
+    )
+
 @app.get("/")
 async def root():
     return HTMLResponse(INDEX_HTML)
@@ -299,7 +363,12 @@ async def precall_page():
 
 
 @app.get("/call")
-async def call_page():
+async def call_page(request: Request, session: str = "", role: str = ""):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login")
+    if session and role:
+        attach_participant(session, role, user["sub"])
     return HTMLResponse(CALL_HTML)
 
 
@@ -310,12 +379,24 @@ def ice_servers():
 
 
 @app.get("/transcript/{session_id}")
-async def transcript_page(session_id: str):
+async def transcript_page(session_id: str, request: Request):
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse(url="/login")
+    participants = get_session_participants(session_id) or {}
+    if user["sub"] not in (participants.get("student_id"), participants.get("tutor_id")):
+        raise HTTPException(status_code=403, detail="You weren't a participant in this session")
     return HTMLResponse(TRANSCRIPT_HTML)
 
 
 @app.get("/api/transcript/{session_id}")
-async def api_transcript(session_id: str):
+async def api_transcript(session_id: str, request: Request):
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not logged in")
+    participants = get_session_participants(session_id) or {}
+    if user["sub"] not in (participants.get("student_id"), participants.get("tutor_id")):
+        raise HTTPException(status_code=403, detail="You weren't a participant in this session")
     segments = get_transcript(session_id)
     notes = get_session_notes(session_id)
     return {
@@ -324,7 +405,6 @@ async def api_transcript(session_id: str):
         "segments": segments,
         "notes": notes,
     }
-
 
 # ============================================================
 # HOME PAGE
