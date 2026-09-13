@@ -1,5 +1,7 @@
-# Website (Flask)
-flask
+# Website (Flask) and Auth0 login
+flask>=3.0
+authlib
+requests
 
 # Video calls + chat (FastAPI)
 fastapi
